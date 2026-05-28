@@ -1,0 +1,3 @@
+metric_name,value,range_low,range_high,unit,source_name,source_url,fetch_date,notes,source_filename
+greenhouse_tomato_annual_yield,60.0,50.0,70.0,kg/m2/year,Alberta Agriculture — Commercial Greenhouse Tomato Production,https://www.alberta.ca/commercial-greenhouse-tomato-production,2026-05-27,"Annual greenhouse tomato yield range cited by Alberta Agriculture for commercial greenhouse operations. Used as a Western Canada benchmark in lieu of BC-specific published yield figures; growing structures and practices are broadly comparable between the two provinces. Center value (60) is the midpoint of the cited 50-70 range, not a separately reported point estimate.
+",bc_greenhouse_tomato_yield.yaml
