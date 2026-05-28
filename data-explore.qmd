@@ -3,3 +3,19 @@ title: "data-explore"
 format: html
 ---
 
+library(tidyverse)
+```{r}
+library(tidyverse)
+```
+```{r}
+daily_sensor <- read_csv("daily_sensor_readings.csv")
+scouting <- read_csv("scouting_observations.csv")
+
+
+sensorscout <- semi_join(scouting, daily_sensor, by = date, plot_id, greenhouse_id)
+
+
+
+
+
+```
