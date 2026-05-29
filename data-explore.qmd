@@ -91,8 +91,80 @@ response_efficiency <- daily_sensor |>
     .groups = "drop"
   )
 
+daily_sensor <- read_csv("data/daily_sensor_readings.csv")
+
+daily_sensor <- daily_sensor |>
+  mutate(
+    health_score = 1 - (
+      0.33 * plant_stress_index +
+      0.33 * disease_risk_index +
+      0.33 * pest_pressure_index
+    )
+  )
+
+response_efficiency <- daily_sensor |>
+  group_by(plot_id) |>
+  summarise(
+    total_alerts = sum(alert_flag == 1, na.rm = TRUE),
+
+    same_day_responses = sum(
+      alert_flag == 1 &
+      action_taken == 1 &
+      action_delay_days == 0,
+      na.rm = TRUE
+    ),
+
+    same_day_response_rate =
+      same_day_responses / total_alerts,
+
+    avg_health_score =
+      mean(health_score, na.rm = TRUE),
+
+    .groups = "drop"
+  ) |>
+  mutate(
+    same_day_response_rate =
+      if_else(is.nan(same_day_response_rate), 0,
+              same_day_response_rate)
+  )
+
+
 
 response_efficiency
+
+
+
+
+
+
+
+
+
+daily_sensor_full <- daily_sensor |>
+  left_join(response_efficiency, by = "plot_id")
+
+daily_sensor
+
+ggplot(
+  daily_sensor_full,
+  aes(
+    x = same_day_response_rate,
+    y = avg_health_score, 
+    color = plant_stress_index
+  )
+) +
+  geom_point(size = 3) +
+  theme_minimal()
+
+daily_sensor_full |> arrange(desc(avg_health_score), desc(same_day_response_rate))
+
+
+
+
+
+write_csv(health_after_response, "health%changeaftersamedayresponse.csv")
+
+write_csv(response_efficiency, "response_effectivness.csv")
 ```
 
 ```{r}
@@ -135,7 +207,7 @@ min(score$score)
 
 
 
-
+plot_health
 plot_health <- daily_sensor |>
   group_by(plot_id) |>
   summarise(
@@ -150,7 +222,7 @@ plot_health <- daily_sensor |>
     .groups = "drop"
   )
 max(daily_sensor$plot_health)
-summary(daily_sensor$plot_health)
+summary(plot_health$plot_health)
 
 normalize <- function(x) {
   (x - min(x, na.rm = TRUE)) / 
@@ -252,6 +324,494 @@ str(plot_crop)
 
 
 
+Plant risk score 
+
+```{r}
+
+
+library(tidyverse)
+library(slider)
+
+daily_sensor <- read_csv("data/daily_sensor_readings.csv")
+
+risk_daily <- daily_sensor |>
+  arrange(plot_id, date) |>
+  group_by(plot_id) |>
+  mutate(
+    # 7-day rolling baseline from PAST data only
+    moisture_base = slide_dbl(lag(substrate_moisture), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+    ph_base       = slide_dbl(lag(substrate_ph), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+    ec_base       = slide_dbl(lag(substrate_ec), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+    vpd_base      = slide_dbl(lag(vpd_kpa), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+    temp_base     = slide_dbl(lag(air_temp_c), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+    humidity_base = slide_dbl(lag(relative_humidity_pct), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+    co2_base      = slide_dbl(lag(co2_ppm), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+    light_base    = slide_dbl(lag(light_ppfd), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+    canopy_base   = slide_dbl(lag(canopy_temp_c), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+
+    # How much today's values changed compared to the past week
+    moisture_dev = abs(substrate_moisture - moisture_base),
+    ph_dev       = abs(substrate_ph - ph_base),
+    ec_dev       = abs(substrate_ec - ec_base),
+    vpd_dev      = abs(vpd_kpa - vpd_base),
+    temp_dev     = abs(air_temp_c - temp_base),
+    humidity_dev = abs(relative_humidity_pct - humidity_base),
+    co2_dev      = abs(co2_ppm - co2_base),
+    light_dev    = abs(light_ppfd - light_base),
+    canopy_dev   = abs(canopy_temp_c - canopy_base)
+  ) |>
+  ungroup() |>
+  mutate(
+    across(
+      ends_with("_dev"),
+      ~ (.x - min(.x, na.rm = TRUE)) / (max(.x, na.rm = TRUE) - min(.x, na.rm = TRUE)),
+      .names = "{.col}_norm"
+    ),
+
+    env_trend_risk =
+      0.20 * moisture_dev_norm +
+      0.15 * ph_dev_norm +
+      0.15 * ec_dev_norm +
+      0.15 * vpd_dev_norm +
+      0.10 * temp_dev_norm +
+      0.10 * humidity_dev_norm +
+      0.05 * co2_dev_norm +
+      0.05 * light_dev_norm +
+      0.05 * canopy_dev_norm,
+
+    index_risk =
+      0.45 * plant_stress_index +
+      0.35 * disease_risk_index +
+      0.20 * pest_pressure_index,
+
+    risk_score = 100 * (
+      0.70 * index_risk +
+      0.30 * env_trend_risk
+    ),
+
+    risk_score = pmin(pmax(risk_score, 0), 100),
+
+    risk_category = case_when(
+      risk_score < 25 ~ "No risk",
+      risk_score < 50 ~ "Low risk",
+      risk_score < 75 ~ "Medium risk",
+      TRUE ~ "High risk"
+    )
+  ) |>
+  filter(!is.na(moisture_base)) |>
+  arrange(desc(risk_score))
+
+
+most_at_risk_by_day <- risk_daily |>
+  group_by(date) |>
+  slice_max(risk_score, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(date, plot_id, risk_score, risk_category,
+         plant_stress_index, disease_risk_index, pest_pressure_index)
+
+most_at_risk_by_day
+
+
+today_risk <- risk_daily |>
+  filter(date == max(date)) |>
+  arrange(desc(risk_score)) |>
+  select(plot_id, date, risk_score, risk_category,
+         plant_stress_index, disease_risk_index, pest_pressure_index,
+         env_trend_risk)
+
+today_risk
+
+
+
+
+```
+
+```{r}
+out_of_character <- daily_sensor |>
+  arrange(plot_id, date) |>
+  group_by(plot_id) |>
+  mutate(
+    across(
+      c(
+        air_temp_c,
+        relative_humidity_pct,
+        vpd_kpa,
+        co2_ppm,
+        light_ppfd,
+        substrate_moisture,
+        substrate_ec,
+        substrate_ph,
+        canopy_temp_c,
+        pest_pressure_index,
+        disease_risk_index,
+        plant_stress_index
+      ),
+      list(
+        baseline = ~ slide_dbl(lag(.x), mean, .before = 6, .complete = TRUE, na.rm = TRUE),
+        sd_base  = ~ slide_dbl(lag(.x), sd,   .before = 6, .complete = TRUE, na.rm = TRUE)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  ) |>
+  ungroup()
+
+
+measure_cols <- c(
+  "air_temp_c",
+  "relative_humidity_pct",
+  "vpd_kpa",
+  "co2_ppm",
+  "light_ppfd",
+  "substrate_moisture",
+  "substrate_ec",
+  "substrate_ph",
+  "canopy_temp_c",
+  "pest_pressure_index",
+  "disease_risk_index",
+  "plant_stress_index"
+)
+
+out_of_character_long <- out_of_character |>
+  pivot_longer(
+    cols = all_of(measure_cols),
+    names_to = "measure",
+    values_to = "value"
+  ) |>
+  mutate(
+    baseline = map2_dbl(
+      measure,
+      row_number(),
+      ~ out_of_character[[paste0(.x, "_baseline")]][.y]
+    ),
+    sd_base = map2_dbl(
+      measure,
+      row_number(),
+      ~ out_of_character[[paste0(.x, "_sd_base")]][.y]
+    ),
+    out_of_character_score = abs(value - baseline) / sd_base
+  ) |>
+  filter(!is.na(out_of_character_score), is.finite(out_of_character_score))
+
+
+
+
+most_unusual_today <- out_of_character_long |>
+  filter(date == max(date)) |>
+  group_by(plot_id) |>
+  slice_max(out_of_character_score, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  arrange(desc(out_of_character_score)) |>
+  select(
+    plot_id,
+    date,
+    measure,
+    value,
+    baseline,
+    sd_base,
+    out_of_character_score
+  )
+
+most_unusual_today
+```
+
+
+```{r}
+
+summary(environment_stability$env_stability_score)
+
+daily_sensor <- daily_sensor |>
+  left_join(
+    environment_stability |>
+      select(plot_id, env_stability_score),
+    by = "plot_id"
+  )
+
+daily_sensor <- daily_sensor |>
+  mutate(
+    risk_score =
+      0.50 * plant_stress_index +
+      0.30 * disease_risk_index +
+      0.20 * pest_pressure_index
+  )
+
+daily_sensor <- daily_sensor |>
+  mutate(
+    plant_health =
+      0.60 * env_stability_score +
+      0.40 * (1 - risk_score)
+  )
+
+
+library(lubridate)
+
+alerts <- daily_sensor |>
+  filter(
+    risk_score >= 0.60 |
+    plant_health <= 0.50
+  ) |>
+  select(
+    plot_id,
+    farm_id,
+    greenhouse_id,
+    alert_date = date,
+    health_on_alert = plant_health,
+    risk_on_alert = risk_score
+  )
+
+alerts <- daily_sensor |>
+  filter(
+    risk_score >= 0.60 |
+    plant_health <= 0.50
+  ) |>
+  distinct(plot_id, date, .keep_all = TRUE) |>
+  transmute(
+    plot_id,
+    alert_date = date,
+    health_on_alert = plant_health,
+    risk_on_alert = risk_score
+  )
+
+
+
+response_effectiveness <- alerts |>
+  left_join(
+    daily_sensor |>
+      select(plot_id, date, plant_health),
+    by = "plot_id"
+  ) |>
+  filter(
+    date > alert_date,
+    date <= alert_date + days(7)
+  ) |>
+  group_by(
+    plot_id,
+    alert_date
+  ) |>
+  summarise(
+    health_on_alert = first(health_on_alert),
+    risk_on_alert = first(risk_on_alert),
+
+    avg_health_next_7_days =
+      mean(plant_health, na.rm = TRUE),
+
+    response_effectiveness =
+      mean(plant_health, na.rm = TRUE) -
+      first(health_on_alert),
+
+    .groups = "drop"
+  )
+
+recovery_time <- alerts |>
+  left_join(
+    daily_sensor |>
+      select(plot_id, date, plant_health),
+    by = "plot_id"
+  ) |>
+  filter(date > alert_date) |>
+  group_by(
+    plot_id,
+    alert_date
+  ) |>
+  summarise(
+    health_on_alert = first(health_on_alert),
+    risk_on_alert = first(risk_on_alert),
+
+    recovery_date =
+      if_else(
+        any(plant_health >= 0.70, na.rm = TRUE),
+        min(date[plant_health >= 0.70], na.rm = TRUE),
+        as.Date(NA)
+      ),
+
+    .groups = "drop"
+  ) |>
+  mutate(
+    recovery_days =
+      as.numeric(recovery_date - alert_date)
+  )
+
+
+risk_reduction <- alerts |>
+  left_join(
+    daily_sensor |>
+      select(plot_id, date, risk_score),
+    by = "plot_id"
+  ) |>
+  filter(
+    date > alert_date,
+    date <= alert_date + days(7)
+  ) |>
+  group_by(
+    plot_id,
+    alert_date
+  ) |>
+  summarise(
+    risk_on_alert = first(risk_on_alert),
+
+    avg_risk_next_7_days =
+      mean(risk_score, na.rm = TRUE),
+
+    risk_reduction =
+      first(risk_on_alert) -
+      mean(risk_score, na.rm = TRUE),
+
+    risk_reduction_pct =
+      100 *
+      (
+        first(risk_on_alert) -
+        mean(risk_score, na.rm = TRUE)
+      ) /
+      first(risk_on_alert),
+
+    .groups = "drop"
+  )
+
+response_summary <- response_effectiveness |>
+  left_join(
+    recovery_time,
+    by = c(
+      "plot_id",
+      "alert_date",
+      "health_on_alert",
+      "risk_on_alert"
+    )
+  ) |>
+  left_join(
+    risk_reduction,
+    by = c(
+      "plot_id",
+      "alert_date",
+      "risk_on_alert"
+    )
+  ) |>
+  mutate(
+    response_category = case_when(
+      response_effectiveness > 0.15 &
+        risk_reduction_pct > 30 ~ "Strong Response",
+
+      response_effectiveness > 0.05 &
+        risk_reduction_pct > 10 ~ "Moderate Response",
+
+      response_effectiveness >= 0 ~ "Weak Response",
+
+      TRUE ~ "No Improvement"
+    )
+  )
+
+plot_response_summary <- response_summary |>
+  group_by(plot_id) |>
+  summarise(
+    avg_response_effectiveness =
+      mean(response_effectiveness, na.rm = TRUE),
+
+    avg_recovery_days =
+      mean(recovery_days, na.rm = TRUE),
+
+    avg_risk_reduction_pct =
+      mean(risk_reduction_pct, na.rm = TRUE),
+
+    alerts_count = n(),
+
+    strong_response_count =
+      sum(response_category == "Strong Response", na.rm = TRUE),
+
+    moderate_response_count =
+      sum(response_category == "Moderate Response", na.rm = TRUE),
+
+    weak_response_count =
+      sum(response_category == "Weak Response", na.rm = TRUE),
+
+    no_improvement_count =
+      sum(response_category == "No Improvement", na.rm = TRUE),
+
+    .groups = "drop"
+  ) |>
+  arrange(desc(avg_risk_reduction_pct))
+
+
+response_summary
+
+
+```
+
+
+```{r}
+
+daily_sensor<- read_csv("data/daily_sensor_readings.csv")
+daily_sensor <- daily_sensor |>
+  mutate(
+    health_score = 1 - (
+      0.33 * plant_stress_index +
+      0.33* disease_risk_index +
+      0.33 * pest_pressure_index
+    )
+  )
+
+response_efficiency <- daily_sensor |>
+  group_by(plot_id) |>
+  summarise(
+    total_alerts = sum(alert_flag == 1, na.rm = TRUE),
+
+    same_day_responses = sum(
+      alert_flag == 1 &
+      action_taken == 1 &
+      action_delay_days == 0,
+      na.rm = TRUE
+    ),
+
+    same_day_response_rate =
+      same_day_responses / total_alerts,
+
+    avg_health_score =
+      mean(health_score, na.rm = TRUE),
+
+    .groups = "drop"
+  ) |>
+  mutate(
+    same_day_response_rate =
+      if_else(is.nan(same_day_response_rate), 0,
+              same_day_response_rate)
+  )
+
+
+cor(
+  response_efficiency$same_day_response_rate,
+  response_efficiency$avg_health_score,
+  use = "complete.obs"
+)
+
+
+response_efficiency
+
+
+
+
+```
+```{r}
+
+
+healthperc <- read_csv("health%changeaftersamedayresponse.csv")
+response_efficiency
+plot_treatment <- read_csv("data/plots.csv")
+
+plot_treatment |> select(plot_id, treatment)
+
+planthealthchangeaftersamedayresponse <- left_join(healthperc, response_efficiency, by = "plot_id")
+planthealthchangeaftersamedayresponse <- left_join(planthealthchangeaftersamedayresponse, plot_treatment, by = "plot_id")
+
+ggplot(planthealthchangeaftersamedayresponse, aes(same_day_response_rate, avg_health_change_pct_3d, color = treatment)) + geom_point()
+
+
+write_csv(planthealthchangeaftersamedayresponse, "planthealth%changewithcategories.csv")
+
+```
+
+
+
+
+
+
+```{r}
 
 
 
@@ -260,6 +820,10 @@ str(plot_crop)
 
 
 
+
+
+
+```
 
 
 
