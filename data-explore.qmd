@@ -231,6 +231,7 @@ summary(score$final_score_scaled)
 
 score
 
+write_csv(score, "plot_score.csv")
 
 
 plot_crop <- daily_sensor |>
