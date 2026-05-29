@@ -11,11 +11,254 @@ library(tidyverse)
 daily_sensor <- read_csv("daily_sensor_readings.csv")
 scouting <- read_csv("scouting_observations.csv")
 
+sensorscout <- scouting |> 
+  mutate(
+    blossom_norm = (blossom_count - min(blossom_count)) /
+                    (max(blossom_count) - min(blossom_count)),
 
-sensorscout <- semi_join(scouting, daily_sensor, by = date, plot_id, greenhouse_id)
+    notes_penalty = case_when(
+      notes_flag == "None"  ~ 0.00,
+      notes_flag == "Minor" ~ 0.10,
+      notes_flag == "Major" ~ 0.25,
+      TRUE ~ 0
+    ),
+
+    leaf_penalty = case_when(
+      leaf_color == "Good" ~ 0.00,
+      leaf_color == "Fair" ~ 0.10,
+      leaf_color == "Poor" ~ 0.25,
+      TRUE ~ 0
+    ),
+
+    risk_score =
+      0.45 * disease_severity +
+      0.35 * pest_severity +
+      0.20 * blossom_norm +
+      notes_penalty +
+      leaf_penalty,
+
+    risk_level = case_when(
+      risk_score < 0.30 ~ "Low",
+      risk_score < 0.60 ~ "Moderate",
+      risk_score < 1.00 ~ "High",
+      TRUE ~ "Critical"
+    )
+  )
+
+
+
+sensorscout
+
+library(readr)
+write_csv(
+  sensorscout, "scouting_riskScore.csv", 
+  na = "NA", 
+)
+
+
+```
+
+
+
+```{r}
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+stress_recovery <- daily_sensor |> group_by(farm_id, greenhouse_id, plot_id) |> mutate(recovery = -mean(post_action_stress_delta_3d)) |> ungroup() |> mutate(recovery = normalize(recovery)) |> select(plot_id, greenhouse_id, farm_id, recovery)
+
+stress_recovery <- unique(stress_recovery)
+stress_recovery
+
 
 
 
 
 
 ```
+
+
+```{r}
+library(tidyverse)
+
+response_efficiency <- daily_sensor |>
+  filter(alert_flag == 1) |>
+  group_by(plot_id) |>
+  summarise(
+    total_alerts = n(),
+    same_day_responses = sum(action_taken == 1 & action_delay_days == 0, na.rm = TRUE),
+    same_day_response_rate = same_day_responses / total_alerts,
+    .groups = "drop"
+  )
+
+
+response_efficiency
+```
+
+```{r}
+
+finance_summary <- read_csv("season_summary.csv")
+
+finance_summary <- finance_summary |> mutate(marketable_yield = season_yield_kg_m2 * marketable_ratio) |> mutate(marketable_yield = normalize(marketable_yield))
+
+
+finance_summary <- finance_summary |> mutate(roi_normalized = normalize(season_roi))
+
+finance_summary <- finance_summary |> mutate(precision_benefit = precision_benefit_cad * total_cost_cad) |> mutate(precision_benefit = normalize(precision_benefit))
+
+season_normalized <- finance_summary |> select(plot_id, marketable_yield, roi_normalized, precision_benefit)
+season_normalized
+
+sensor <- left_join(stress_recovery, response_efficiency, by = "plot_id") |> select(plot_id, recovery, same_day_response_rate)
+
+final <- left_join(season_normalized, sensor, by = "plot_id")
+
+final
+
+
+
+
+
+score <- final |> mutate(score = .45 * marketable_yield + .25 * roi_normalized + .10 * recovery + .00 * same_day_response_rate + .20 * precision_benefit)
+score
+mean(score$score)
+ggplot(score, aes(x=plot_id, y = score)) + geom_col()
+
+score |> arrange(desc(score))
+
+max(score$score)
+min(score$score)
+
+```
+
+```{r}
+
+
+
+
+plot_health <- daily_sensor |>
+  group_by(plot_id) |>
+  summarise(
+    plot_health = mean(
+      1 - (
+        .33 * plant_stress_index +
+        .33 * disease_risk_index +
+        .33 * pest_pressure_index
+      ),
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+max(daily_sensor$plot_health)
+summary(daily_sensor$plot_health)
+
+normalize <- function(x) {
+  (x - min(x, na.rm = TRUE)) / 
+    (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+environment_stability <- daily_sensor |>
+  group_by(plot_id) |>
+  summarise(
+    air_temp_sd = sd(air_temp_c, na.rm = TRUE),
+    humidity_sd = sd(relative_humidity_pct, na.rm = TRUE),
+    vpd_sd = sd(vpd_kpa, na.rm = TRUE),
+    moisture_sd = sd(substrate_moisture, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    air_temp_var_n = normalize(air_temp_sd),
+    humidity_var_n = normalize(humidity_sd),
+    vpd_var_n = normalize(vpd_sd),
+    moisture_var_n = normalize(moisture_sd),
+
+    env_variability =
+      0.25 * air_temp_var_n +
+      0.25 * humidity_var_n +
+      0.25 * vpd_var_n +
+      0.25 * moisture_var_n,
+
+    env_stability_score = 1 - env_variability
+  )
+
+daily_sensor
+
+plot_health
+summary(plot_health)
+max(plot_health$plot_health)
+environment_stability
+
+sensor_scores <- left_join(plot_health, environment_stability, by = "plot_id") 
+
+sensor_scores <- sensor_scores |> select(plot_id, plot_health, env_stability_score)
+
+
+sensor_scores
+```
+
+
+
+
+
+```{r}
+
+score <- score |> select(plot_id, marketable_yield, roi_normalized,precision_benefit)
+
+
+score <- left_join(score, sensor_scores)
+
+score |> mutate(precision_benefit = normalize(precision_benefit))
+
+
+
+score <- score |> mutate(final_score = .30 * marketable_yield + .25 * roi_normalized + .25 * plot_health + .15 * env_stability_score + .05 * precision_benefit)
+
+
+
+
+score |> arrange(desc(marketable_yield)) |> ggplot(aes(x=plot_id, y = marketable_yield)) + geom_col()
+
+
+score <- score |>
+  mutate(
+      final_score_scaled = final_score * (0.90 / max(final_score))
+  )
+
+summary(score$final_score_scaled)
+
+
+
+
+score
+
+
+
+plot_crop <- daily_sensor |>
+  ungroup() |>
+  distinct(plot_id, crop)
+
+write_csv(plot_crop, "plot_crop.csv")
+
+file.exists("plot_crop.csv")
+list.files(pattern = "plot")
+
+plot_crop
+write_csv(plot_crop, "plot_crop.csv")
+class(plot_crop)
+str(plot_crop)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
