@@ -813,6 +813,44 @@ write_csv(planthealthchangeaftersamedayresponse, "planthealth%changewithcategori
 
 ```{r}
 
+daily_sensor <- read_csv("data/daily_sensor_readings.csv")
+
+library(slider)
+
+daily_sensor_risk_score <- daily_sensor |>
+  arrange(plot_id, date) |>
+  group_by(plot_id) |>
+  mutate(
+    stress_7d_change =
+      plant_stress_index -
+      lag(plant_stress_index, 7),
+
+    disease_7d_change =
+      disease_risk_index -
+      lag(disease_risk_index, 7),
+
+    pest_7d_change =
+      pest_pressure_index -
+      lag(pest_pressure_index, 7)
+  )
+
+
+plot_baseline <- daily_sensor |>
+  group_by(plot_id) |>
+  summarise(
+    moisture_mean = mean(substrate_moisture),
+    moisture_sd   = sd(substrate_moisture),
+
+    temp_mean = mean(air_temp_c),
+    temp_sd   = sd(air_temp_c),
+
+    vpd_mean = mean(vpd_kpa),
+    vpd_sd   = sd(vpd_kpa),
+
+    ph_mean = mean(substrate_ph),
+    ph_sd   = sd(substrate_ph)
+  )
+
 
 
 
@@ -825,5 +863,492 @@ write_csv(planthealthchangeaftersamedayresponse, "planthealth%changewithcategori
 
 ```
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+
+# -----------------------------
+# 1. Read data
+# -----------------------------
+
+daily_sensor <- read_csv("data/daily_sensor_readings.csv")
+daily_costs <- read_csv("data/daily_input_costs.csv")
+plots <- read_csv("data/plots.csv")
+season_summary <- read_csv("data/season_summary.csv")
+
+
+daily_sensor <- daily_sensor |>
+  mutate(date = as.Date(date))
+
+daily_costs <- daily_costs |>
+  mutate(date = as.Date(date))
+
+
+
+
+# -----------------------------
+# 2. Helper normalize function
+# -----------------------------
+
+normalize <- function(x) {
+  if (all(is.na(x))) return(x)
+  range_x <- max(x, na.rm = TRUE) - min(x, na.rm = TRUE)
+  if (range_x == 0) return(rep(0, length(x)))
+  (x - min(x, na.rm = TRUE)) / range_x
+}
+
+
+# -----------------------------
+# 3. Join daily sensor + costs + plot info
+# -----------------------------
+
+risk_base <- daily_sensor |>
+  left_join(
+    daily_costs |>
+      select(
+        date, plot_id,
+        daily_total_input_cost,
+        daily_precision_cost,
+        daily_precision_actions_count,
+        daily_total_actions_count,
+        daily_routine_cost
+      ),
+    by = c("date", "plot_id")
+  ) |>
+  left_join(
+    plots |>
+      select(
+        plot_id,
+        crop_plot = crop,
+        treatment,
+        treatment_block,
+        plot_area_m2,
+        plant_density_plants_m2
+      ),
+    by = "plot_id"
+  )
+
+
+# -----------------------------
+# 4. Calculate plot baselines
+# -----------------------------
+# This lets us find what is "out of character" for each plot
+
+plot_baselines <- risk_base |>
+  group_by(plot_id) |>
+  summarise(
+    temp_mean = mean(air_temp_c, na.rm = TRUE),
+    temp_sd = sd(air_temp_c, na.rm = TRUE),
+
+    humidity_mean = mean(relative_humidity_pct, na.rm = TRUE),
+    humidity_sd = sd(relative_humidity_pct, na.rm = TRUE),
+
+    vpd_mean = mean(vpd_kpa, na.rm = TRUE),
+    vpd_sd = sd(vpd_kpa, na.rm = TRUE),
+
+    moisture_mean = mean(substrate_moisture, na.rm = TRUE),
+    moisture_sd = sd(substrate_moisture, na.rm = TRUE),
+
+    ec_mean = mean(substrate_ec, na.rm = TRUE),
+    ec_sd = sd(substrate_ec, na.rm = TRUE),
+
+    ph_mean = mean(substrate_ph, na.rm = TRUE),
+    ph_sd = sd(substrate_ph, na.rm = TRUE),
+
+    canopy_mean = mean(canopy_temp_c, na.rm = TRUE),
+    canopy_sd = sd(canopy_temp_c, na.rm = TRUE),
+
+    .groups = "drop"
+  )
+
+
+# -----------------------------
+# 5. Build daily at-risk score
+# -----------------------------
+
+daily_risk <- risk_base |>
+  left_join(plot_baselines, by = "plot_id") |>
+  arrange(plot_id, date) |>
+  group_by(plot_id) |>
+  mutate(
+    # Current biological risk
+    current_risk =
+      0.50 * plant_stress_index +
+      0.30 * disease_risk_index +
+      0.20 * pest_pressure_index,
+
+    # 7-day trends
+    stress_7d_change = plant_stress_index - lag(plant_stress_index, 7),
+    disease_7d_change = disease_risk_index - lag(disease_risk_index, 7),
+    pest_7d_change = pest_pressure_index - lag(pest_pressure_index, 7),
+
+    # Only worsening trends count as risk
+    stress_trend_risk = pmax(stress_7d_change, 0, na.rm = TRUE),
+    disease_trend_risk = pmax(disease_7d_change, 0, na.rm = TRUE),
+    pest_trend_risk = pmax(pest_7d_change, 0, na.rm = TRUE),
+
+    trend_risk =
+      0.50 * stress_trend_risk +
+      0.30 * disease_trend_risk +
+      0.20 * pest_trend_risk,
+
+    # Environmental anomaly z-scores
+    z_temp = abs((air_temp_c - temp_mean) / temp_sd),
+    z_humidity = abs((relative_humidity_pct - humidity_mean) / humidity_sd),
+    z_vpd = abs((vpd_kpa - vpd_mean) / vpd_sd),
+    z_moisture = abs((substrate_moisture - moisture_mean) / moisture_sd),
+    z_ec = abs((substrate_ec - ec_mean) / ec_sd),
+    z_ph = abs((substrate_ph - ph_mean) / ph_sd),
+    z_canopy = abs((canopy_temp_c - canopy_mean) / canopy_sd),
+
+    anomaly_score_raw = pmax(
+      z_temp,
+      z_humidity,
+      z_vpd,
+      z_moisture,
+      z_ec,
+      z_ph,
+      z_canopy,
+      na.rm = TRUE
+    ),
+
+    # Cap extreme z-scores so one weird value does not destroy the scale
+    anomaly_risk = pmin(anomaly_score_raw / 3, 1),
+
+    # Response risk
+    alert_risk = if_else(alert_flag == 1, 1, 0),
+    no_action_penalty = if_else(alert_flag == 1 & action_taken == 0, 1, 0),
+    delay_penalty = if_else(alert_flag == 1, pmin(action_delay_days / 3, 1), 0),
+    failed_response_penalty = if_else(post_action_stress_delta_3d > 0, 1, 0),
+
+    response_risk =
+      0.35 * alert_risk +
+      0.25 * no_action_penalty +
+      0.20 * delay_penalty +
+      0.20 * failed_response_penalty
+  ) |>
+  ungroup() |>
+  mutate(
+    trend_risk_n = normalize(trend_risk),
+
+    risk_score =
+      100 * (
+        0.35 * current_risk +
+        0.25 * trend_risk_n +
+        0.20 * anomaly_risk +
+        0.20 * response_risk
+      ),
+
+    risk_category = case_when(
+      risk_score < 25 ~ "Low",
+      risk_score < 50 ~ "Moderate",
+      risk_score < 75 ~ "High",
+      TRUE ~ "Critical"
+    )
+  )
+
+
+# -----------------------------
+# 6. Identify main risk driver
+# -----------------------------
+
+daily_risk <- daily_risk |>
+  rowwise() |>
+  mutate(
+    main_driver = names(which.max(c(
+      "Plant stress" = plant_stress_index,
+      "Disease risk" = disease_risk_index,
+      "Pest pressure" = pest_pressure_index,
+      "Worsening trend" = trend_risk_n,
+      "Environment anomaly" = anomaly_risk,
+      "Response issue" = response_risk
+    )))
+  ) |>
+  ungroup()
+
+
+# -----------------------------
+# 7. Latest risk score per plot
+# -----------------------------
+
+latest_risk <- daily_risk |>
+  group_by(plot_id) |>
+  filter(date == max(date, na.rm = TRUE)) |>
+  ungroup() |>
+  left_join(
+    season_summary |>
+      select(
+        plot_id,
+        season_yield_kg_m2,
+        marketable_ratio,
+        season_profit_cad,
+        season_roi,
+        precision_benefit_cad
+      ),
+    by = "plot_id"
+  ) |>
+  arrange(desc(risk_score))
+
+
+# -----------------------------
+# 8. Ranked table of most at-risk plots
+# -----------------------------
+
+top_risk_plots <- latest_risk |>
+  select(
+    plot_id,
+    crop = crop_plot,
+    treatment,
+    risk_score,
+    risk_category,
+    main_driver,
+    plant_stress_index,
+    disease_risk_index,
+    pest_pressure_index,
+    alert_flag,
+    action_taken,
+    action_delay_days,
+    season_profit_cad,
+    precision_benefit_cad
+  ) |>
+  arrange(desc(risk_score))
+
+top_risk_plots |> 
+  slice_head(n = 15)
+
+
+# -----------------------------
+# 9. Plot 1: Top at-risk plots
+# -----------------------------
+
+ggplot(
+  top_risk_plots |> slice_head(n = 20),
+  aes(
+    x = reorder(plot_id, risk_score),
+    y = risk_score,
+    fill = risk_category
+  )
+) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 20 At-Risk Plots",
+    subtitle = "Higher score means the plot needs attention sooner",
+    x = "Plot ID",
+    y = "Risk Score"
+  ) +
+  theme_minimal()
+
+
+# -----------------------------
+# 10. Plot 2: Risk score by crop
+# -----------------------------
+
+ggplot(
+  latest_risk,
+  aes(
+    x = crop_plot,
+    y = risk_score,
+    fill = crop_plot
+  )
+) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "At-Risk Score by Crop",
+    x = "Crop",
+    y = "Risk Score"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+# -----------------------------
+# 11. Plot 3: Risk score vs profit
+# -----------------------------
+
+ggplot(
+  latest_risk,
+  aes(
+    x = risk_score,
+    y = season_profit_cad,
+    size = plot_area_m2,
+    color = crop_plot
+  )
+) +
+  geom_point(alpha = 0.75) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Are High-Risk Plots Less Profitable?",
+    x = "Latest Risk Score",
+    y = "Season Profit CAD",
+    size = "Plot Area m²",
+    color = "Crop"
+  ) +
+  theme_minimal()
+
+
+# -----------------------------
+# 12. Plot 4: Risk score over time
+# -----------------------------
+
+ggplot(
+  daily_risk,
+  aes(
+    x = date,
+    y = risk_score,
+    group = plot_id,
+    color = crop_plot
+  )
+) +
+  geom_line(alpha = 0.25) +
+  geom_smooth(aes(group = crop_plot), se = FALSE, linewidth = 1.2) +
+  labs(
+    title = "Risk Score Over Time",
+    subtitle = "Thin lines are plots; thick lines show crop-level trend",
+    x = "Date",
+    y = "Risk Score",
+    color = "Crop"
+  ) +
+  theme_minimal()
+
+
+# -----------------------------
+# 13. Plot 5: Heatmap of risk by plot and date
+# -----------------------------
+
+ggplot(
+  daily_risk,
+  aes(
+    x = date,
+    y = reorder(plot_id, risk_score),
+    fill = risk_score
+  )
+) +
+  geom_tile() +
+  labs(
+    title = "Daily Plot Risk Heatmap",
+    x = "Date",
+    y = "Plot ID",
+    fill = "Risk Score"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+
+# -----------------------------
+# 14. Plot 6: What is driving risk?
+# -----------------------------
+
+driver_summary <- latest_risk |>
+  count(main_driver, risk_category) |>
+  group_by(main_driver) |>
+  mutate(percent = n / sum(n)) |>
+  ungroup()
+
+ggplot(
+  driver_summary,
+  aes(
+    x = reorder(main_driver, n),
+    y = n,
+    fill = risk_category
+  )
+) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Main Drivers of Plot Risk",
+    x = "Main Risk Driver",
+    y = "Number of Plots",
+    fill = "Risk Category"
+  ) +
+  theme_minimal()
+
+# -----------------------------
+# 15. Final risk dataset
+# -----------------------------
+
+final_risk <- latest_risk |>
+  select(
+    plot_id,
+    crop = crop_plot,
+    treatment,
+    treatment_block,
+    plot_area_m2,
+    plant_density_plants_m2,
+    risk_score,
+    risk_category,
+    main_driver,
+    plant_stress_index,
+    disease_risk_index,
+    pest_pressure_index,
+    current_risk,
+    trend_risk_n,
+    anomaly_risk,
+    response_risk,
+    alert_flag,
+    action_taken,
+    action_delay_days,
+    season_yield_kg_m2,
+    marketable_ratio,
+    season_profit_cad,
+    season_roi,
+    precision_benefit_cad
+  ) |>
+  arrange(desc(risk_score))
+
+final_risk
+# -----------------------------
+# 18. Optional: choose one plot and inspect it
+# -----------------------------
+
+selected_plot <- top_risk_plots$plot_id[1]
+
+daily_risk |>
+  filter(plot_id == selected_plot) |>
+  ggplot(
+    aes(x = date)
+  ) +
+  geom_line(aes(y = risk_score), linewidth = 1.1) +
+  geom_point(
+    data = daily_risk |> filter(plot_id == selected_plot, alert_flag == 1),
+    aes(y = risk_score),
+    size = 2
+  ) +
+  labs(
+    title = paste("Risk Timeline for", selected_plot),
+    subtitle = "Dots show alert days",
+    x = "Date",
+    y = "Risk Score"
+  ) +
+  theme_minimal()
+
+
+
+
+write_csv(final_risk, "at_risk_plots.csv")
+
+
+
+
+```
 
 
