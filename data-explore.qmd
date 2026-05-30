@@ -1231,7 +1231,7 @@ ggplot(
 # -----------------------------
 # 13. Plot 5: Heatmap of risk by plot and date
 # -----------------------------
-
+library(tidyverse)
 ggplot(
   daily_risk,
   aes(
@@ -1350,5 +1350,667 @@ write_csv(final_risk, "at_risk_plots.csv")
 
 
 ```
+```{r}
+
+library(tidyverse)
+library(lubridate)
+library(slider)
+
+# read data
+daily_sensor <- read_csv("data/daily_sensor_readings.csv") |>
+  mutate(date = as.Date(date))
+
+# helper: normalize 0–1 safely
+normalize <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (rng[1] == rng[2]) return(rep(0.5, length(x)))
+  (x - rng[1]) / (rng[2] - rng[1])
+}
+
+# calculate daily plant health first
+daily_sensor <- daily_sensor |>
+  mutate(
+    plant_health = 1 - (
+      0.50 * plant_stress_index +
+      0.30 * disease_risk_index +
+      0.20 * pest_pressure_index
+    )
+  )
+
+# rolling 7-day risk score
+plot_risk_daily <- daily_sensor |>
+  arrange(plot_id, date) |>
+  group_by(plot_id) |>
+  mutate(
+    # past 7 days, excluding today
+    past7_plant_health = slide_dbl(
+      lag(plant_health),
+      mean,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_plant_stress = slide_dbl(
+      lag(plant_stress_index),
+      mean,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_disease_risk = slide_dbl(
+      lag(disease_risk_index),
+      mean,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_pest_pressure = slide_dbl(
+      lag(pest_pressure_index),
+      mean,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_air_temp_sd = slide_dbl(
+      lag(air_temp_c),
+      sd,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_humidity_sd = slide_dbl(
+      lag(relative_humidity_pct),
+      sd,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_vpd_sd = slide_dbl(
+      lag(vpd_kpa),
+      sd,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_moisture_sd = slide_dbl(
+      lag(substrate_moisture),
+      sd,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_ec_sd = slide_dbl(
+      lag(substrate_ec),
+      sd,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_ph_sd = slide_dbl(
+      lag(substrate_ph),
+      sd,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_canopy_temp_sd = slide_dbl(
+      lag(canopy_temp_c),
+      sd,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    )
+  ) |>
+  ungroup() |>
+  mutate(
+    env_stability_raw =
+      past7_air_temp_sd +
+      past7_humidity_sd +
+      past7_vpd_sd +
+      past7_moisture_sd +
+      past7_ec_sd +
+      past7_ph_sd +
+      past7_canopy_temp_sd,
+
+    env_instability_score = normalize(env_stability_raw),
+
+    past_health_risk = 1 - past7_plant_health,
+
+    current_risk =
+      0.50 * plant_stress_index +
+      0.30 * disease_risk_index +
+      0.20 * pest_pressure_index,
+
+    risk_score_raw =
+      0.40 * current_risk +
+      0.30 * past_health_risk +
+      0.20 * env_instability_score +
+      0.10 * past7_plant_stress,
+
+    risk_score = round(normalize(risk_score_raw) * 100, 1),
+
+    risk_level = case_when(
+      is.na(risk_score) ~ NA_character_,
+      risk_score < 25 ~ "Low",
+      risk_score < 50 ~ "Medium",
+      risk_score < 75 ~ "High",
+      TRUE ~ "Critical"
+    )
+  ) |>
+  filter(!is.na(risk_score)) |>
+  select(
+    date,
+    plot_id,
+    crop,
+    risk_score,
+    risk_level
+  )
+
+# save final CSV
+write_csv(plot_risk_daily, "daily_plot_risk_scores.csv")
+
+ggplot(plot_risk_daily, aes(x = date, y = risk_score, color = plot_id)) +
+  geom_line()
+
+
+
+
+plot_risk_daily
+
+
+
+
+
+
+
+
+
+```
+
+```{r}
+
+health_change <- read_csv("planthealth%changewithcategories.csv")
+health_change
+
+health_change_understand <- health_change |> group_by(treatment) |> mutate(avg_health_improvment = mean(avg_health_change_pct_3d))
+health_change_understand
+
+health_change_plot <- health_change_understand |>  ggplot(aes(x=avg_health_improvment, y= treatment, group = treatment)) + geom_col()
+
+max(health_change_understand$avg_health_improvment)
+pest <-  health_change |> filter(treatment == "Integrated Pest") 
+
+(pest$avg_health_change_pct_3d)
+
+ggplot(pest, aes(x=treatment, y = mean(avg_health_change_pct_3d))) + geom_col()
+
+sum(pest$avg_health_change_pct_3d)
+mean(pest$avg_health_change_pct_3d)
+health_change_plot
+
+
+
+
+health_change_understand <- health_change |>
+  group_by(treatment) |>
+  summarise(
+    avg_health_improvement = mean(avg_health_change_pct_3d, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(health_change_understand, "health_improvment_percent_change_by_treatment.csv")
+
+
+
+health_change_plot <- ggplot(
+  health_change_understand,
+  aes(x = avg_health_improvement, y = treatment)
+) +
+  geom_col()
+
+health_change_plot
+
+
+
+```
+
+
+
+
+
+```{r}
+
+library(tidyverse)
+library(slider)
+
+normalize <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (rng[1] == rng[2]) return(rep(0.5, length(x)))
+  (x - rng[1]) / (rng[2] - rng[1])
+}
+
+# read files
+daily_sensor <- read_csv("data/daily_sensor_readings.csv") |>
+  mutate(date = as.Date(date))
+
+daily_costs <- read_csv("data/daily_input_costs.csv") |>
+  mutate(date = as.Date(date))
+
+season_summary <- read_csv("data/season_summary.csv")
+
+target_mean <- 0.75
+
+daily_score <- daily_sensor |>
+  mutate(
+    raw_plot_health = 1 - (
+      0.50 * plant_stress_index +
+      0.30 * disease_risk_index +
+      0.20 * pest_pressure_index
+    ),
+    
+    plot_health = raw_plot_health * (target_mean / mean(raw_plot_health, na.rm = TRUE)),
+    
+    plot_health = pmin(plot_health, 1)
+  )
+
+daily_score |> select(plot_id, plot_health, greenhouse_id, farm_id) |> write_csv("daily_health_score_scaled_75.csv")
+
+daily_score
+
+
+
+
+
+
+
+
+# join financial data
+daily_score <- daily_score |>
+  left_join(
+    daily_costs |>
+      select(
+        date,
+        plot_id,
+        daily_total_input_cost,
+        daily_precision_cost,
+        daily_routine_cost,
+        daily_precision_actions_count,
+        daily_total_actions_count
+      ),
+    by = c("date", "plot_id")
+  ) |>
+  left_join(
+    season_summary |>
+      select(
+        plot_id,
+        season_revenue_cad,
+        total_cost_cad,
+        season_profit_cad,
+        season_roi,
+        precision_benefit_cad
+      ),
+    by = "plot_id"
+  )
+
+# financial risk component
+daily_score <- daily_score |>
+  mutate(
+    profit_at_risk = season_profit_cad * (1 - plot_health),
+    profit_at_risk_n = normalize(profit_at_risk),
+
+    daily_cost_n = normalize(daily_total_input_cost),
+    precision_cost_n = normalize(daily_precision_cost),
+
+    # higher score = better daily condition
+    daily_plot_score = 
+      0.40 * plot_health +
+      0.25 * env_stability_score +
+      0.20 * (1 - profit_at_risk_n) +
+      0.15 * (1 - daily_cost_n)
+  )
+
+# scale to 0–90
+daily_score <- daily_score |>
+  mutate(
+    daily_plot_score_scaled =
+      daily_plot_score * (90 / max(daily_plot_score, na.rm = TRUE))
+  )
+
+# add simple category
+daily_score <- daily_score |>
+  mutate(
+    score_category = case_when(
+      daily_plot_score_scaled >= 75 ~ "Excellent",
+      daily_plot_score_scaled >= 60 ~ "Good",
+      daily_plot_score_scaled >= 45 ~ "Watch",
+      TRUE ~ "At Risk"
+    )
+  )
+
+# final csv
+daily_plot_score <- daily_score |>
+  select(
+    date,
+    plot_id,
+    crop,
+    daily_plot_score_scaled,
+    score_category,
+    plot_health,
+    env_stability_score,
+    profit_at_risk,
+    daily_total_input_cost,
+    daily_precision_cost,
+    daily_routine_cost,
+    season_profit_cad,
+    season_roi,
+    precision_benefit_cad
+  )
+
+daily_plot_score_no_nas <-na.omit(daily_plot_score)
+
+
+write_csv(daily_plot_score_no_nas, "daily_plot_score.csv")
+
+summary(daily_plot_score$daily_plot_score_scaled)
+
+
+daily_plot_score |> filter(plot_id == "P0001") |> ggplot(aes(x=date, y = daily_plot_score_scaled)) + geom_line()
+
+
+
+```
+
+
+
+```{r}
+normalize_10_90 <- function(x) {
+  10 + 80 * (x - min(x, na.rm = TRUE)) /
+    (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+daily_health_score <- read_csv("daily_health_score.csv")
+daily_score <- read_csv("datasetstouse/daily_plot_score.csv")
+daily_plot_risk_scores <- read_csv("datasetstouse/daily_plot_risk_scores.csv")
+
+daily_health_score <- daily_health_score |>
+  mutate(
+    plot_health_90 = normalize_10_90(plot_health)
+  )
+
+daily_score <- daily_score |>
+  mutate(
+    env_stability_90 = normalize_10_90(env_stability_score)
+  )
+
+daily_plot_risk_scores <- daily_plot_risk_scores |>
+  mutate(
+    risk_score_90 = normalize_10_90(risk_score)
+  )
+
+daily_plot_score <- daily_plot_score |>
+  mutate(
+    final_score_90 = normalize_10_90(daily_plot_score_scaled)
+  )
+
+
+summary(daily_health_score$plot_health_90)
+summary(daily_score$env_stability_90)
+summary(daily_plot_risk_scores$risk_score_90)
+summary(daily_plot_score$final_score_90)
+colnames(daily_score)
+
+
+score_category <- function(x) {
+  case_when(
+    x < 18 ~ "Critical",
+    x < 36 ~ "Poor",
+    x < 54 ~ "Fair",
+    x < 72 ~ "Good",
+    TRUE ~ "Excellent"
+  )
+}
+
+risk_category <- function(x) {
+  case_when(
+    x < 18 ~ "Low",
+    x < 36 ~ "Moderate",
+    x < 54 ~ "Elevated",
+    x < 72 ~ "High",
+    TRUE ~ "Critical"
+  )
+}
+
+
+daily_health_score <- daily_health_score |>
+  mutate(plot_health_category = score_category(plot_health_90))
+
+daily_score <- daily_score |>
+  mutate(env_stability_category = score_category(env_stability_90))
+
+daily_plot_score <- daily_plot_score |>
+  mutate(plot_score_category = score_category(final_score_90))
+
+daily_plot_risk_scores <- daily_plot_risk_scores |>
+  mutate(risk_category = risk_category(risk_score_90))
+
+
+
+daily_score_complete <- daily_score |>
+  select(
+    date,
+    plot_id,
+    crop,
+    env_stability_90,
+    env_stability_category
+  ) |>
+
+  left_join(
+    daily_health_score |>
+      select(
+        date,
+        plot_id,
+        plot_health_90,
+        plot_health_category
+      ),
+    by = c("date", "plot_id")
+  ) |>
+
+  left_join(
+    daily_plot_risk_scores |>
+      select(
+        date,
+        plot_id,
+        risk_score_90,
+        risk_category
+      ),
+    by = c("date", "plot_id")
+  ) |>
+
+  left_join(
+    daily_plot_score |>
+      select(
+        date,
+        plot_id,
+        final_score_90,
+        plot_score_category
+      ),
+    by = c("date", "plot_id")
+  )
+
+
+
+
+daily_score_complete <- daily_score_complete |> mutate(plot_score_90 = final_score_90)
+
+
+daily_score_complete
+
+write_csv(daily_score_complete, "all_scores_complete.csv")
+
+
+colnames(daily_health_score)
+
+daily_health_score <- daily_health_score |> select(plot_id, plot_health_90, plot_health_category)
+
+
+daily_score_complete <- daily_score |>select(date, plot_id, crop, env_stability_90, env_stability_category)
+
+
+left_join(daily_health_score, daily_score_complete, by = "plot_id")
+
+daily_score_complete
+
+
+
+
+```
+
+
+```{r}
+
+
+plots <- read_csv("data/plots.csv")
+greenhouses <-read_csv("data/greenhouses.csv")
+farms <- read_csv("data/farms.csv")
+
+daily_score_complete <- daily_score_complete |>
+
+  left_join(
+    plots |>
+      select(
+        plot_id,
+        treatment,
+        treatment_block,
+        row_orientation,
+        plot_area_m2,
+        plant_density_plants_m2,
+        greenhouse_id,
+        farm_id
+      ),
+    by = "plot_id"
+  ) |>
+
+  left_join(
+    greenhouses |>
+      select(
+        greenhouse_id,
+        structure_type,
+        heating_system,
+        irrigation_system
+      ),
+    by = "greenhouse_id"
+  ) |>
+
+  left_join(
+    farms |>
+      select(
+        farm_id,
+        farm_name,
+        region,
+        climate_zone,
+        production_system
+      ),
+    by = "farm_id"
+  )
+
+
+write_csv(daily_score_complete, "all_scores_complete.csv")
+
+
+
+
+```
+
+
+
+
+```{r}
+
+library(tidyverse)
+library(lubridate)
+library(slider)
+
+daily_sensor <- read_csv("data/daily_sensor_readings.csv") |>
+  mutate(date = as.Date(date))
+
+all_scores_complete <- read_csv("all_scores_complete.csv") |>
+  mutate(date = as.Date(date)) 
+
+past7_response_rate <- daily_sensor |>
+  arrange(plot_id, date) |>
+  group_by(plot_id) |>
+  mutate(
+    past7_alerts = slide_dbl(
+      alert_flag,
+      sum,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_actions_taken = slide_dbl(
+      if_else(alert_flag == 1 & action_taken == 1, 1, 0),
+      sum,
+      .before = 6,
+      .complete = TRUE,
+      na.rm = TRUE
+    ),
+
+    past7_response_rate = if_else(
+      past7_alerts > 0,
+      past7_actions_taken / past7_alerts,
+      NA_real_
+    ),
+
+    past7_response_rate_pct = past7_response_rate * 100
+  ) |>
+  ungroup() |>
+  select(
+    date,
+    plot_id,
+    past7_alerts,
+    past7_actions_taken,
+    past7_response_rate,
+    past7_response_rate_pct
+  )
+
+all_scores_complete <- all_scores_complete |>
+  left_join(
+    past7_response_rate,
+    by = c("date", "plot_id")
+  )
+
+write_csv(all_scores_complete, "data/all_scores_complete.csv")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
